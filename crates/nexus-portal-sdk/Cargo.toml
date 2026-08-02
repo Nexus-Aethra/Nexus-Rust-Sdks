@@ -1,0 +1,19 @@
+[package]
+name = "nexus-portal-sdk"
+description = "Nexus Portal 官方 Rust SDK: JWKS 缓存 / JWT 验证 / 模块管理"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
