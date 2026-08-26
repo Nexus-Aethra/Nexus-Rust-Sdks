@@ -89,4 +89,36 @@ mod tests {
         assert!(jwk.is_rsa());
         assert_eq!(jwk.algorithm().unwrap(), jsonwebtoken::Algorithm::RS256);
     }
+
+    #[test]
+    fn claims_deserialize_portal_jwt_fields() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "iss": "nexus-portal",
+            "sub": "user-1",
+            "username": "alice",
+            "roles": ["user"],
+            "type": "access",
+            "exp": 2_000_000_000,
+            "iat": 1_900_000_000
+        }))
+        .unwrap();
+        assert_eq!(claims.issuer, "nexus-portal");
+        assert_eq!(claims.user_id, "user-1");
+        assert!(claims.key_id.is_empty());
+    }
+
+    #[test]
+    fn claims_deserialize_portal_verify_response_fields() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": "user-1",
+            "username": "alice",
+            "roles": [],
+            "type": "access",
+            "exp": 2_000_000_000,
+            "iat": 1_900_000_000
+        }))
+        .unwrap();
+        assert_eq!(claims.issuer, "");
+        assert_eq!(claims.key_id, "");
+    }
 }

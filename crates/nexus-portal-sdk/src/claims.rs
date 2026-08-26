@@ -14,9 +14,11 @@ pub struct Claims {
     /// 角色列表
     #[serde(default)]
     pub roles: Vec<String>,
-    /// Token 签发者 (iss)
+    /// Token 签发者 (标准 JWT 字段 `iss`; `issuer` 保留作兼容别名)
+    #[serde(rename = "iss", alias = "issuer", default)]
     pub issuer: String,
-    /// 签名密钥 ID (kid) — 由 Header 注入
+    /// 签名密钥 ID (kid) — 由 JWT Header 注入，不在 Payload 中
+    #[serde(default)]
     pub key_id: String,
     /// Token 类型: access / refresh / service
     #[serde(rename = "type", default)]
