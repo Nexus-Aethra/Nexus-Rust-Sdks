@@ -18,3 +18,8 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset"] }
 jsonwebtoken = "9"
 base64 = "0.22"
+axum = "0.7"
+rsa = "0.9"
+rand = "0.8"
+pkcs8 = { version = "0.10", features = ["std"] }
+sha2 = "0.10"

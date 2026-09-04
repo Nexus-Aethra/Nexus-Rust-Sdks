@@ -2,9 +2,17 @@
 //!
 //! 能力:
 //!   - JWKS 自动拉取与缓存 (kid 未命中自动刷新重试)
-//!   - 用户 Token 本地验证 (零网络)
+//!   - 用户 Token 本地验证 (零网络, 默认校验 iss 匹配 "nexus-portal")
 //!   - Token Portal 端验证 (/auth/verify)
 //!   - 模块自身管理 (密钥轮转, HMAC 签名)
+//!
+//! 安全默认值 (CWE-918 / CWE-347 缓解):
+//!   - 默认 HTTP 客户端 `redirect::Policy::none()`, 拒绝跟随 30x;
+//!     阻止 portal_url 通过 302 跳到内网/IMDS 造成 SSRF。
+//!   - `Options::expected_issuer` 默认 `Some("nexus-portal".into())`,
+//!     `verify_token` 强制校验 JWT 的 `iss` 字段, 防止跨租户伪造 token。
+//!   - `Options::expected_audience` 默认为 `None` (Portal 当前不签 aud);
+//!     设为 `Some(...)` 后开启 aud 校验。
 
 use crate::claims::Claims;
 use crate::errors::{PortalError, Result, SdkError};
@@ -13,6 +21,9 @@ use crate::jwks_cache::JwksCache;
 use jsonwebtoken::{decode_header, Algorithm, DecodingKey, Validation};
 use std::time::Duration;
 use tokio::sync::oneshot;
+
+/// JWT 验证的 iss 默认值。Portal 当前所有 token 都签 `iss: "nexus-portal"`。
+pub const DEFAULT_EXPECTED_ISSUER: &str = "nexus-portal";
 
 /// SDK 配置项 (零值采用合理默认)
 #[derive(Debug, Clone)]
@@ -25,6 +36,12 @@ pub struct Options {
     pub max_clock_skew: Duration,
     /// 模块自身凭证 (可选, 用于模块管理 API)
     pub module: Option<ModuleCredentials>,
+    /// JWT 必须匹配的 `iss` 字段值。默认 `Some(DEFAULT_EXPECTED_ISSUER.into())`。
+    /// 设为 `None` 会**关闭** iss 校验 (不推荐)。
+    pub expected_issuer: Option<String>,
+    /// JWT 必须匹配的 `aud` 字段值。默认 `None` (Portal 当前不签 aud,
+    /// 校验关闭)。一旦 Portal 引入 aud claim, 部署方应设此值。
+    pub expected_audience: Option<String>,
 }
 
 impl Default for Options {
@@ -34,6 +51,8 @@ impl Default for Options {
             timeout: Duration::from_secs(5),
             max_clock_skew: Duration::from_secs(30),
             module: None,
+            expected_issuer: Some(DEFAULT_EXPECTED_ISSUER.to_string()),
+            expected_audience: None,
         }
     }
 }
@@ -63,11 +82,25 @@ impl Client {
 
     /// 创建带自定义配置的客户端
     pub fn with_options(portal_url: &str, options: Options) -> Self {
+        let http = Self::build_default_http(&options);
+        Self::with_options_and_http_client(portal_url, options, http)
+    }
+
+    /// 创建客户端, 注入自定义 reqwest::Client
+    ///
+    /// 调用方负责 client 的 redirect / timeout / proxy 等安全配置。
+    /// SDK 不会覆盖调用方注入的 redirect policy。
+    pub fn with_http_client(portal_url: &str, http: reqwest::Client) -> Self {
+        Self::with_options_and_http_client(portal_url, Options::default(), http)
+    }
+
+    /// 完整构造函数: 自定义 options + 自定义 http client
+    pub fn with_options_and_http_client(
+        portal_url: &str,
+        options: Options,
+        http: reqwest::Client,
+    ) -> Self {
         assert!(!portal_url.is_empty(), "portalsdk: portal_url is required");
-        let http = reqwest::Client::builder()
-            .timeout(options.timeout)
-            .build()
-            .expect("portalsdk: build http client");
         let cache = JwksCache::new(portal_url.to_string(), http.clone(), options.jwks_cache_ttl);
         Self {
             portal_url: portal_url.trim_end_matches('/').to_string(),
@@ -76,6 +109,15 @@ impl Client {
             options,
             stop_tx: None,
         }
+    }
+
+    /// SDK 默认的 reqwest::Client: 关闭 30x 跟随, 阻断 SSRF 跳板。
+    fn build_default_http(options: &Options) -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(options.timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("portalsdk: build http client")
     }
 
     /// Portal 地址
@@ -118,10 +160,24 @@ impl Client {
     fn verify_with_key(&self, token: &str, key: &DecodingKey) -> Result<Claims> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.leeway = self.options.max_clock_skew.as_secs();
-        validation.validate_aud = false;
+
+        // iss 校验: 默认开启, Options.expected_issuer = Some("nexus-portal")
+        // 时强制匹配。设 None 关闭 (不推荐, 仅兼容老部署过渡用)。
+        if let Some(issuer) = self.options.expected_issuer.as_deref() {
+            validation.set_issuer(&[issuer]);
+        } else {
+            // 与 jsonwebtoken 默认行为一致: 不做 iss 校验
+        }
+
+        // aud 校验: 默认关闭 (Portal 当前不签 aud), 显式设了才校验。
+        if let Some(aud) = self.options.expected_audience.as_deref() {
+            validation.set_audience(&[aud]);
+        } else {
+            validation.validate_aud = false;
+        }
 
         let mut claims: Claims = jsonwebtoken::decode(token, key, &validation)
-            .map_err(|e| classify_error(e))?
+            .map_err(classify_error)?
             .claims;
         claims.key_id = decode_header(token)
             .map(|h| h.kid.clone().unwrap_or_default())
@@ -267,6 +323,8 @@ fn classify_error(e: jsonwebtoken::errors::Error) -> SdkError {
         ErrorKind::ImmatureSignature => SdkError::TokenNotYetValid,
         ErrorKind::InvalidSignature => SdkError::SignatureInvalid,
         ErrorKind::InvalidAlgorithm => SdkError::SignatureInvalid,
+        ErrorKind::InvalidIssuer => SdkError::InvalidIssuer,
+        ErrorKind::InvalidAudience => SdkError::InvalidAudience,
         _ => SdkError::TokenMalformed(e.to_string()),
     }
 }

@@ -17,6 +17,12 @@ pub enum SdkError {
     #[error("portalsdk: signature invalid")]
     SignatureInvalid,
 
+    #[error("portalsdk: token issuer mismatch (expected one of the configured issuers)")]
+    InvalidIssuer,
+
+    #[error("portalsdk: token audience mismatch (expected one of the configured audiences)")]
+    InvalidAudience,
+
     #[error("portalsdk: unknown key id: {0}")]
     UnknownKeyId(String),
 
@@ -46,6 +52,8 @@ impl SdkError {
             Self::TokenExpired => "TOKEN_EXPIRED",
             Self::TokenNotYetValid => "TOKEN_NOT_YET_VALID",
             Self::SignatureInvalid => "SIGNATURE_INVALID",
+            Self::InvalidIssuer => "INVALID_ISSUER",
+            Self::InvalidAudience => "INVALID_AUDIENCE",
             Self::UnknownKeyId(_) => "UNKNOWN_KEY_ID",
             Self::PortalUnreachable(_) => "PORTAL_UNREACHABLE",
             Self::PortalInvalidResponse(_) => "PORTAL_INVALID_RESPONSE",
