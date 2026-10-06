@@ -334,3 +334,83 @@ async fn with_options_and_http_client_keeps_options() {
     let err = client.verify_token(&token).await.expect_err("must reject");
     assert!(matches!(err, SdkError::InvalidIssuer), "got {err:?}");
 }
+
+/// 签一个 `exp` 是**字符串**而不是数字的 token。
+///
+/// 单独抽出来是因为 `sign_jwt` 永远发数字 exp，而类型混淆正是这条漏洞的
+/// 触发条件,用现有 helper 造不出来。
+fn sign_jwt_with_raw_exp(
+    private: &RsaPrivateKey,
+    kid: &str,
+    iss: &str,
+    exp: serde_json::Value,
+) -> String {
+    use serde_json::json;
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(kid.to_string());
+    let pkcs8_pem = private
+        .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+        .expect("pkcs8 pem");
+    let key = EncodingKey::from_rsa_pem(pkcs8_pem.as_bytes()).expect("encoding key");
+    let claims = json!({
+        "iss": iss,
+        "sub": "user-1",
+        "username": "alice",
+        "roles": ["user"],
+        "type": "access",
+        "exp": exp,
+        "iat": jsonwebtoken::get_current_timestamp() as i64,
+    });
+    encode(&header, &claims, &key).expect("sign jwt")
+}
+
+/// GHSA-h395-gr6q-cpjc / CVE-2026-25537 的边界守卫:类型错误的 `exp`
+/// 过去会被 jsonwebtoken 标成 `FailedToParse`,而校验逻辑把它当成
+/// `NotPresent` **整个跳过** —— 攻击者可以发一个永不过期的 token。
+///
+/// 说清楚这条测试到底在守什么:
+/// - 它**不是** CVE 修复的证明。修复来自版本升级到 jsonwebtoken >= 10.3.0,
+///   那里加了「校验开启时 FailedToParse 直接报错」。
+/// - 本 SDK 在 9.x 下其实也**不可被利用**:`Validation::new` 默认
+///   `required_spec_claims = {"exp"}` 且 `validate_exp = true`,而必填检查
+///   本身就能拦住 `FailedToParse`。`nbf` 绕过需要 `validate_nbf = true`
+///   且没进必填,这两个条件在 `verify_with_key` 里一个都不成立。
+/// - 它守的是**我们自己的配置**:日后有人把 `exp` 移出必填列表、或给
+///   `verify_token` 开上 `validate_nbf`,这条会立刻红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn type_confused_exp_is_never_accepted() {
+    let (addr, _hits, private) = spawn_mock_portal().await;
+    let client = Client::new(&format!("http://{addr}"));
+
+    // 对照组:同一把钥匙、同一套 harness,格式正确的 token **必须**能通过。
+    // 没有这一行,下面 5 个断言可能在 JWKS 拉取失败之类的无关原因上全部
+    // 「通过」—— 那样的测试看着是绿的,其实什么都没验。
+    let good = sign_jwt_with_raw_exp(
+        &private,
+        "test-kid",
+        "nexus-portal",
+        serde_json::json!(jsonwebtoken::get_current_timestamp() as i64 + 3600),
+    );
+    client
+        .verify_token(&good)
+        .await
+        .expect("对照:格式正确的 token 必须被接受,否则下面的拒绝证明不了任何事");
+
+    for exp in [
+        serde_json::json!("never"),
+        serde_json::json!(99999999999i64.to_string()),
+        serde_json::json!(null),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let token = sign_jwt_with_raw_exp(&private, "test-kid", "nexus-portal", exp.clone());
+        let err = client
+            .verify_token(&token)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("类型错误的 exp({exp}) 必须被拒,却通过了验证"));
+        // 不挑具体错误类型 —— 这里要断言的是「不许通过」这一条不变量。
+        // 类型层、必填层、解析层任何一层拦下都算合格。
+        let _ = err;
+    }
+}
