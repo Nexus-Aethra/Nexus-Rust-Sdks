@@ -16,7 +16,15 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset"] }
-jsonwebtoken = "9"
+# GHSA-h395-gr6q-cpjc / CVE-2026-25537: 9.x 把类型错误的 nbf/exp
+# (TryParse::FailedToParse) 当成 NotPresent 跳过校验，可绕过时间类安全限制。
+# 修复自 10.3.0。写 "10.3" 拿到修复 + 后续 10.x 补丁，不吃 11 的大版本跳跃。
+#
+# 10.x 第二个破坏性变更：加密后端不再自动推断，必须显式选一个 provider，
+# 否则第一次加密操作直接 panic（fail-closed，不会静默跳过校验）。
+# 选 rust_crypto（纯 Rust）而不是 aws_lc_rs：本 workspace 的 reqwest 走
+# rustls-tls，同为纯 Rust，不给桌面壳 / wasm 构建引入新的 C 依赖。
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
 base64 = "0.22"
 axum = "0.7"
 rsa = "0.9"
